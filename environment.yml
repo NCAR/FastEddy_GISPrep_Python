@@ -1,0 +1,14 @@
+name: fasteddy_gisprep
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.12
+  - duckdb=1.5.*
+  - geopandas=1.1.*
+  - numpy=2.1.*
+  - pyproj=3.7.*
+  - rasterio=1.4.*
+  - requests=2.32.*
+  - shapely=2.0.*
+  - xarray=2025.1.*

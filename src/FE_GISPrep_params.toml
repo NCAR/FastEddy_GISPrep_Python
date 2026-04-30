@@ -1,0 +1,55 @@
+# couplerParams.toml
+#
+# FastEddy GIS Prep parameter file.
+
+## - Domain description - ##
+# Enter domain description parameters.
+
+# Domain name
+domain_name = 'domain_10kmx10km'
+# Longitude of origin (decimal degrees E)
+lon_0 = -105.24192
+# Latitude of origin (decimal degrees N)
+lat_0 = 40.03757
+# Domain height (meters)
+domain_height = 10000
+# Domain width (meters)
+domain_width = 10000
+# Cell size (meters)
+cell_size = 2
+
+## - ##
+
+## - Data paths - ##
+
+# Path to store domain datasets
+# Logs will write to the same folder
+base_path = '/path/to/output/directory'
+
+# - Mandatory datasets - #
+
+# Elevation
+# These are stored as tiles. The default url below can be queried for data falling with the domain.
+elev_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
+
+# NLCD
+# This is a CONUS dataset. Code will download and unzip from the default url below.
+# Optionally, point to a local copy.
+nlcd_url = 'https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annual_NLCD_LndCov_2024_CU_C1V1.zip'
+# nlcd_url = '/path/to/local/copy'
+
+# - #
+
+# - Optional datasets. To exclude, enter an empty string (''). - #
+
+# Buildings footprints
+# Overture maps include building heights in their dataset. This url plus internal code is set up to find the latest release.
+buildings_fp_url = 's3://overturemaps-us-west-2/release'
+
+# Lidar Point Cloud
+# Not used in the current version, but will be for multiple heights per building.
+lidar_url = ''
+
+# - #
+
+## - ##
