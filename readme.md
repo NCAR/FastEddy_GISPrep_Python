@@ -12,7 +12,7 @@ The workflow is as follows:
 ## Instructions
 While in the target directory, clone the remote repository:
 
-git clone https://github.come/NCAR/FastEddy_GISPrep_Python
+git clone https://github.com/NCAR/FastEddy_GISPrep_Python
 
 Navigate to FastEddy_GISPrep_Python. Set up the conda environment by running the following commands:
 
@@ -26,3 +26,6 @@ python -m FE_GISPrep_Python {/path/to/parameter/file}
 
 ## Output
 The output GIS NetCDF file matches the specifications required by FastEddy GeoSpec.py.
+
+## Requirements
+Python 3.12+
