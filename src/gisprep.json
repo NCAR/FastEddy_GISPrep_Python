@@ -1,0 +1,13 @@
+{
+  "domain_name": "domain_10kmx10km",
+  "lon_0": -105.24192,
+  "lat_0": 40.03757,
+  "domain_height": 10000,
+  "domain_width": 10000,
+  "cell_size": 2,
+  "base_path": "/path/to/output/directory",
+  "elev_url": "https://tnmaccess.nationalmap.gov/api/v1/products",
+  "nlcd_url": "https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annual_NLCD_LndCov_2024_CU_C1V1.zip",
+  "buildings_fp_url": "s3://overturemaps-us-west-2/release",
+  "lidar_url": ""
+}
