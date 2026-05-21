@@ -2,6 +2,7 @@
 FastEddy_GISPreprocessor_Python.py
 '''
 
+import json
 import logging
 import math
 from pathlib import Path
@@ -644,9 +645,14 @@ if __name__ == '__main__':
   if len(sys.argv) == 2:
 
     # Load parameters
+    # NOTE: Will likely switch to .json only.
     param_file = sys.argv[1]
-    with open(param_file, 'rb') as pf:
-      setup_params = tomllib.load(pf)
+    if Path(param_file).suffix == '.toml':
+      with open(param_file, 'rb') as pf:
+        setup_params = tomllib.load(pf)
+    elif Path(param_file).suffix == '.json':
+      with open(param_file, 'r') as pf:
+        setup_params = json.load(pf)
       
     # Create base path if it does not exist
     domain_name = setup_params['domain_name']
