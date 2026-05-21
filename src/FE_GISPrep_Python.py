@@ -20,6 +20,7 @@ from rasterio import features
 from rasterio.fill import fillnodata
 from rasterio.merge import merge
 from rasterio.transform import from_bounds as transform_from_bounds
+from rasterio.vrt import WarpedVRT
 from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.windows import from_bounds
 import requests
@@ -397,13 +398,36 @@ class FE_GISPrep:
     # reverse=True ensures 2020 comes before 2013 in the list.
     tif_files.sort(key=self.extractYear, reverse=True)
 
-    # Open the first file and grab its metadata
-    with rasterio.open(tif_files[0]) as first_src:
-      out_meta = first_src.meta.copy()
     
-    # Merge data tiles
-    logging.info('\nStitching... (This may take a minute...)')
-    mosaic, out_trans = merge(tif_files)
+    # -- Merge Logic -- #
+    logging.info(
+      '\nVirtually reprojecting and stitching... (This may take a minute...)'
+    )
+    sources = []
+    vrt_list = []
+    
+    try:
+      # Open files and wrap each in a virtual reprojector pointed at target CRS
+      for tif in tif_files:
+        src = rasterio.open(tif)
+        sources.append(src)
+        
+        vrt = WarpedVRT(src, crs=self.proj_string)
+        vrt_list.append(vrt)
+        
+      # Merge the virtually reprojected tiles!
+      mosaic, out_trans = merge(vrt_list)
+      
+      # Grab metadata from the first VRT to base our output on
+      out_meta = vrt_list[0].meta.copy()
+      
+    finally:
+      # Clean up memory by closing all VRTs and source datasets
+      for vrt in vrt_list:
+        vrt.close()
+      for src in sources:
+        src.close()
+    # -- #
 
     # Update the metadata for the new stitched grid
     out_meta.update({
