@@ -634,15 +634,46 @@ class FE_GISPrep:
     elev = np.flip(elev, axis=0)
     nlcd = np.flip(nlcd, axis=0)
 
-    # Build base data dictionary
+    # Generate WKT string and modify name to be domain-relevant
+    crs_obj = CRS.from_proj4(self.proj_string)
+    wkt_str = crs_obj.to_wkt()
+    custom_crs_name = f'{self.dname}_LCC'
+    # pyproj defaults custom names to 'unknown'
+    wkt_str = wkt_str.replace('unknown', custom_crs_name, 1)
+
+    # Define shared attributes
+    data_attrs = {
+      'grid_mapping': 'crs',
+      'coordinates': 'lat lon'
+    }
+
+    # Build the data dictionary with inline attributes
     data_vars = {
-      'x': (['x'], self.xs),
-      'y': (['y'], self.ys),
-      'elevation': (['y', 'x'], elev),
-      'lat': (['y', 'x'], self.lats),
-      'lon': (['y', 'x'], self.lons),
-      'LandCover': (['y', 'x'], nlcd),
-      'cellsize': self.cs
+      # Add standard names and units to 1D axes
+      'x': (['x'], self.xs, {'standard_name': 'projection_x_coordinate', 'units': 'meters'}),
+      'y': (['y'], self.ys, {'standard_name': 'projection_y_coordinate', 'units': 'meters'}),
+      'cellsize': self.cs,
+      
+      # Add standard names and units to 2D lat/lon
+      'lat': (['y', 'x'], self.lats, {'standard_name': 'latitude', 'units': 'degrees_north'}),
+      'lon': (['y', 'x'], self.lons, {'standard_name': 'longitude', 'units': 'degrees_east'}),
+      
+      # Attach the grid_mapping tag to your arrays
+      'elevation': (['y', 'x'], elev, data_attrs),
+      'LandCover': (['y', 'x'], nlcd, data_attrs),
+      
+      # Create the dummy CRS variable (ArcGIS looks for this!)
+      'crs': ([], 0, {
+        'grid_mapping_name': 'lambert_conformal_conic',
+        'longitude_of_central_meridian': self.lon_0,
+        'latitude_of_projection_origin': self.lat_0,
+        # FastEddy typically uses the origin lat for both standard parallels
+        'standard_parallel': [self.lat_0, self.lat_0], 
+        'false_easting': 0.0,
+        'false_northing': 0.0,
+        'crs_wkt': wkt_str,      # The official CF-1.6 standard
+        'spatial_ref': wkt_str   # The GDAL/ESRI fallback
+      })
     }
 
     # Conditionally add building data
@@ -655,7 +686,10 @@ class FE_GISPrep:
     # Build and save Dataset
     ds = xr.Dataset(
       data_vars=data_vars,
-      attrs=dict(description='NetCDF file created from automated Python pipeline')
+      attrs=dict(
+        description='FastEddy GIS Dataset',
+        Conventions='CF-1.8' # Explicitly declare CF compliance
+      )
     )
     ds.to_netcdf(self.nc_fp)
 
