@@ -16,7 +16,14 @@ domain_height = 10000
 # Domain width (meters)
 domain_width = 10000
 # Cell size (meters)
-cell_size = 2
+cell_size = 10
+# Building height level of detail (LOD)
+# LOD 0 (default): single height per footprint; LOD 1: single height per cell
+# Only referenced if LiDAR Point Cloud used to derive heights
+lod = 0
+# Building height filters (experimental)
+# strict (default): additional "spike" control; loose: 90th percentile threshold only
+height_filters = 'strict'
 
 ## - ##
 
@@ -44,11 +51,13 @@ nlcd_url = 'https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annu
 
 # Buildings footprints
 # Overture maps include building heights in their dataset. This url plus internal code is set up to find the latest release.
-buildings_fp_url = 's3://overturemaps-us-west-2/release'
+buildings_fp_url = ''
+# buildings_fp_url = 's3://overturemaps-us-west-2/release'
 
 # Lidar Point Cloud
-# Not used in the current version, but will be for multiple heights per building.
+# When included, will attempt to use the lidar point cloud to generate building heights.
 lidar_url = ''
+# lidar_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
 
 # - #
 
