@@ -254,6 +254,10 @@ class FE_GISPrep:
     )
     logging.info(f'proj-string: {self.proj_string}')
 
+    # Initialize empty lists to store targeted file paths
+    self.elev_files = []
+    self.laz_files = []
+
 
   def bufferedDomain(self, buffer_size=0.05):
     '''
@@ -353,7 +357,7 @@ class FE_GISPrep:
     '''
     logging.info('Extracting LiDAR building heights (Memory-Safe Multiprocessing)...')
     
-    laz_files = list(self.lidar_tp.glob('*.laz'))
+    laz_files = self.laz_files
     if not laz_files:
       logging.warning('No LAZ files found in directory.')
       return
@@ -368,7 +372,7 @@ class FE_GISPrep:
     gdf_bldgs_proj['shape_area'] = gdf_bldgs_proj.geometry.area
 
     all_p90_series = []
-    max_workers = int(max(1, multiprocessing.cpu_count() / 2))
+    max_workers = min(2, max(1, int(multiprocessing.cpu_count() * 0.6)))
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
       future_to_file = {
@@ -461,7 +465,7 @@ class FE_GISPrep:
         final_array = base_canvas
         
       elif self.lod == 1:
-        laz_files = list(self.lidar_tp.glob('*.laz'))
+        laz_files = self.laz_files
         
         if not laz_files:
           logging.warning('No LAZ files found! Falling back to LOD-0.')
@@ -470,7 +474,7 @@ class FE_GISPrep:
           logging.info('Extracting high-res LOD-1 pixels via multiprocessing...')
           footprint_mask = base_canvas > 0
           master_lod1_array = np.zeros((out_height, out_width), dtype=np.float32)
-          max_workers = min(10, max(1, int(multiprocessing.cpu_count() * 0.8)))
+          max_workers = min(2, max(1, int(multiprocessing.cpu_count() * 0.6)))
           
           with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_file = {
@@ -649,7 +653,7 @@ class FE_GISPrep:
     return int(match.group(1)) if match else 0
 
 
-  def stitchElev(self, input_folder, output_filepath):
+  def stitchElev(self, output_filepath):
     '''
     Creates a single virtually-stitched mosaic from multiple DEM tiles, prioritizing
     newer tiles when filling gaps, and saves the output to a compressed GeoTIFF.
@@ -664,9 +668,8 @@ class FE_GISPrep:
     if output_filepath.is_file():
       logging.info(f'Elevation mosaic already exists at {output_filepath}.\n')
       return
-    
-    logging.info(f'Scanning {input_folder} for TIFFs...')
-    tif_files = list(input_folder.glob('*.tif'))
+
+    tif_files = self.elev_files
     
     if not tif_files:
       logging.warning('No TIFF files found!')
@@ -978,7 +981,13 @@ if __name__ == '__main__':
     logging.info('Elevation data already processed or mosaiced. Skipping TNM API query.')
   else:
     elev_urls = FGP.query_tnm_api('Digital Elevation Model (DEM) 1 meter', 'GeoTIFF')
-    FGP.downloadTiles(elev_urls, FGP.elev_tp)
+    if elev_urls:
+      FGP.downloadTiles(elev_urls, FGP.elev_tp)
+      # Store ONLY the specific intersecting files required for this domain
+      FGP.elev_files = [FGP.elev_tp.joinpath(url.split('/')[-1]) for url in elev_urls]
+    else:
+      logging.warning('No elevation tiles found for this domain.')
+    
 
   nlcd_str = str(FGP.nlcd_url).strip()
   if nlcd_str.startswith('http') and nlcd_str.lower().endswith('.zip'):
@@ -1001,6 +1010,8 @@ if __name__ == '__main__':
       laz_urls = FGP.query_tnm_api('Lidar Point Cloud (LPC)', 'LAZ')
       if laz_urls:
         FGP.downloadTiles(laz_urls, FGP.lidar_tp)
+        # Store ONLY the specific intersecting files required for this domain
+        FGP.laz_files = [FGP.lidar_tp.joinpath(url.split('/')[-1]) for url in laz_urls]
       else:
         logging.warning('No LiDAR tiles found for this domain.')
 
@@ -1010,7 +1021,7 @@ if __name__ == '__main__':
   if FGP.lidar_url and FGP.bldgs_fp_url:
     FGP.extractLidarHeights()
   
-  FGP.processRaster(FGP.elev_mp, FGP.elev_fp, Resampling.bilinear)
+  FGP.processRaster(FGP.elev_mp, FGP.elev_fp, Resampling.average)
   FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, Resampling.nearest)
   
   if FGP.bldgs_fp_url:
