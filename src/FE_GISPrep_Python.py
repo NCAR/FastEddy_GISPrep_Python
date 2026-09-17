@@ -660,8 +660,6 @@ class FE_GISPrep:
 
     Parameters
     ----------
-    input_folder : pathlib.Path
-      Directory containing the downloaded DEM .tif files.
     output_filepath : pathlib.Path
       The desired path for the final stitched output file.
     '''
@@ -1015,7 +1013,7 @@ if __name__ == '__main__':
       else:
         logging.warning('No LiDAR tiles found for this domain.')
 
-  FGP.stitchElev(FGP.elev_tp, FGP.elev_mp)
+  FGP.stitchElev(FGP.elev_mp)
   FGP.bufferedNLCD()
   
   if FGP.lidar_url and FGP.bldgs_fp_url:
