@@ -47,6 +47,9 @@ base_path = '/path/to/output/directory'
 
 # Elevation
 # These are stored as tiles. The default url below can be queried for data falling with the domain.
+# Optional elev_source: 'tnm' (default, USGS 3DEP via the TNM API, US only) or 'copernicus' (Copernicus DEM GLO-30,
+# global 30 m, AWS open data; elev_url is then optional and overrides the bucket URL).
+# elev_source = 'copernicus'
 elev_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
 # Optional: TNM elevation product and download-URL filter (default: 1 m DEM).
 # For large/coarse domains use the seamless 1 arc-second (~30 m) DEM; only the
@@ -54,13 +57,19 @@ elev_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
 # elev_dataset = 'National Elevation Dataset (NED) 1 arc-second'
 # elev_url_filter = '/Elevation/1/TIFF/'
 
+# Land cover
+# Optional landcover_source: 'nlcd' (default, CONUS), 'worldcover' (ESA WorldCover 2021 10 m, global) or 'corine'
+# (CORINE Land Cover 2018, Europe, polygons from the EEA map service). worldcover_url / corine_url override the
+# default locations. The GeoSpec.py land-cover table and water_cats must match the chosen source.
+# landcover_source = 'worldcover'
 # NLCD
 # This is a CONUS dataset. Code will download and unzip from the default url below.
 # Optionally, point to a local copy.
 nlcd_url = 'https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annual_NLCD_LndCov_2024_CU_C1V1.zip'
 # nlcd_url = '/path/to/local/copy'
-# Optional: resampling of land cover to cell_size (rasterio Resampling name; default 'nearest').
-# 'mode' assigns the majority class when cell_size is much coarser than 30 m.
+# Optional: resampling of land cover to cell_size (rasterio Resampling name; default 'nearest'), for any source
+# (also accepted as landcover_resampling). 'mode' assigns the majority class when cell_size is much coarser than the
+# source resolution (CORINE is rasterized directly onto the grid and does not use it).
 # nlcd_resampling = 'mode'
 
 # - #
@@ -77,10 +86,14 @@ buildings_fp_url = ''
 lidar_url = ''
 # lidar_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
 
+# Soil properties: soil_source = 'soilgrids' (ISRIC SoilGrids 2.0, global 250 m, read over the domain from the ISRIC
+# virtual rasters; soilgrids_url overrides the location) or 'polaris' (implied by a non-empty polaris_url).
+# soil_vars, soil_stat and soil_depths work like the polaris_* keys below.
+# soil_source = 'soilgrids'
 # POLARIS soil properties (Chaney et al. 2019, WRR; 30 m, CONUS only)
 # When included, downloads the 1 x 1 degree tiles covering the domain and writes the variables per depth interval
 # (dimension soil_depth, with soil_depth_top/bottom in m) to the NetCDF file, e.g. sand/silt/clay (%) for the
-# FastEddy land-surface model soil texture classes (GeoSpec.py soil_opt).
+# FastEddy land-surface model soil texture classes (GeoSpec.py lsm_opt).
 polaris_url = ''
 # polaris_url = 'http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0'
 polaris_vars = ['sand', 'silt', 'clay']
