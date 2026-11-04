@@ -59,6 +59,16 @@ buildings_fp_url = ''
 lidar_url = ''
 # lidar_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
 
+# POLARIS soil properties (Chaney et al. 2019, WRR; 30 m, CONUS only)
+# When included, downloads the 1 x 1 degree tiles covering the domain and writes the variables per depth interval
+# (dimension soil_depth, with soil_depth_top/bottom in m) to the NetCDF file, e.g. sand/silt/clay (%) for the
+# FastEddy land-surface model soil texture classes (GeoSpec.py soil_opt).
+polaris_url = ''
+# polaris_url = 'http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0'
+polaris_vars = ['sand', 'silt', 'clay']
+polaris_stat = 'mean'
+polaris_depths = ['0_5', '5_15', '15_30', '30_60', '60_100', '100_200']
+
 # - #
 
 ## - ##

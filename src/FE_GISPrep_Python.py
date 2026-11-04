@@ -245,6 +245,20 @@ class FE_GISPrep:
       self.lidar_url = None
       logging.info('No building file data provided.')
 
+    # POLARIS soil properties (Chaney et al. 2019, WRR), 30 m, CONUS only; optional ('' or absent = off)
+    self.polaris_url = setup_params.get('polaris_url', '')
+    if self.polaris_url:
+      self.polaris_url = self.polaris_url.rstrip('/')
+      self.polaris_vars = setup_params.get('polaris_vars', ['sand', 'silt', 'clay'])
+      self.polaris_stat = setup_params.get('polaris_stat', 'mean')
+      self.polaris_depths = setup_params.get('polaris_depths', ['0_5', '5_15', '15_30', '30_60', '60_100', '100_200'])
+      self.polaris_tp = self.base_path.joinpath('polaris_tiles')
+      logging.info(f'POLARIS data source: {self.polaris_url} ({self.polaris_stat} of {self.polaris_vars}, '
+                   f'depths {self.polaris_depths} cm)')
+    else:
+      self.polaris_url = None
+      logging.info('No POLARIS soil data requested.')
+
     self.nc_fp = self.base_path.joinpath(f'{self.dname}_gis.nc')
     logging.info(f'NetCDF output file: {self.nc_fp}')
 
@@ -789,6 +803,71 @@ class FE_GISPrep:
     logging.info('NLCD clipping complete!')
 
 
+  def polarisTiles(self):
+    '''
+    Lists the POLARIS 1 x 1 degree tiles (EPSG:4326) that cover the buffered domain.
+
+    Returns
+    -------
+    list of str
+      Tile names such as 'lat4041_lon-106-105'.
+    '''
+    lats = range(math.floor(self.lat_buff_s), math.ceil(self.lat_buff_n))
+    lons = range(math.floor(self.lon_buff_w), math.ceil(self.lon_buff_e))
+    return [f'lat{la}{la + 1}_lon{lo}{lo + 1}' for la in lats for lo in lons]
+
+
+  def polarisPath(self, var, depth, kind):
+    '''
+    Local path of a POLARIS product for one variable and depth: kind 'mosaic' (tiles merged, EPSG:4326)
+    or 'final' (on the FastEddy grid).
+    '''
+    return self.base_path.joinpath(f'{self.dname}_polaris_{var}_{self.polaris_stat}_{depth}_{kind}.tif')
+
+
+  def downloadPolaris(self):
+    '''
+    Downloads the POLARIS tiles of every requested variable and depth that cover the buffered domain,
+    skipping tiles and products that already exist.
+    '''
+    tiles = self.polarisTiles()
+    logging.info(f'POLARIS tiles covering the domain: {tiles}')
+    for var in self.polaris_vars:
+      for depth in self.polaris_depths:
+        if self.polarisPath(var, depth, 'final').is_file() or self.polarisPath(var, depth, 'mosaic').is_file():
+          continue
+        tile_path = self.polaris_tp.joinpath(var, self.polaris_stat, depth)
+        tile_path.mkdir(parents=True, exist_ok=True)
+        urls = [f'{self.polaris_url}/{var}/{self.polaris_stat}/{depth}/{t}.tif' for t in tiles]
+        self.downloadTiles(urls, tile_path)
+
+
+  def processPolaris(self):
+    '''
+    Merges the POLARIS tiles of each variable and depth and regrids them onto the FastEddy master grid
+    (area average, as for the elevation).
+    '''
+    tiles = self.polarisTiles()
+    for var in self.polaris_vars:
+      for depth in self.polaris_depths:
+        mosaic_fp = self.polarisPath(var, depth, 'mosaic')
+        if not mosaic_fp.is_file() and not self.polarisPath(var, depth, 'final').is_file():
+          tile_path = self.polaris_tp.joinpath(var, self.polaris_stat, depth)
+          sources = [rasterio.open(tile_path.joinpath(f'{t}.tif')) for t in tiles]
+          try:
+            mosaic, out_trans = merge(sources)
+            out_meta = sources[0].meta.copy()
+          finally:
+            for src in sources:
+              src.close()
+          out_meta.update({'driver': 'GTiff', 'height': mosaic.shape[1], 'width': mosaic.shape[2],
+                           'transform': out_trans, 'compress': 'zstd', 'tiled': True})
+          with rasterio.open(mosaic_fp, 'w', **out_meta) as dest:
+            dest.write(mosaic)
+          logging.info(f'POLARIS mosaic written: {mosaic_fp}')
+        self.processRaster(mosaic_fp, self.polarisPath(var, depth, 'final'), Resampling.average)
+
+
   def processRaster(self, input_path, output_path, resampling_method):
     '''
     Reprojects, resamples, and clips a raster dataset to exactly match 
@@ -921,6 +1000,33 @@ class FE_GISPrep:
       })
     }
 
+    if self.polaris_url:
+      # soil properties per depth interval (soil_depth, y, x); no-data (e.g. open water) filled from neighbours
+      units = {'sand': '%', 'silt': '%', 'clay': '%'}
+      for var in self.polaris_vars:
+        layers = []
+        for depth in self.polaris_depths:
+          with rasterio.open(self.polarisPath(var, depth, 'final')) as src:
+            arr = src.read(1).astype(np.float32)
+            nodata = src.nodata
+          bad = ~np.isfinite(arr) | (arr == -9999)
+          if nodata is not None:
+            bad |= (arr == nodata)
+          arr = np.where(bad, np.nan, arr)
+          if np.all(np.isnan(arr)):
+            logging.error(f'POLARIS {var} {depth} cm has no data in the domain (POLARIS covers CONUS only)')
+            sys.exit(1)
+          arr = fillnodata(arr, mask=~np.isnan(arr))
+          layers.append(np.flip(arr, axis=0))
+        data_vars[var] = (['soil_depth', 'y', 'x'], np.stack(layers),
+                          dict(data_attrs, units=units.get(var, ''),
+                               long_name=f'POLARIS {var} ({self.polaris_stat}) per depth interval',
+                               source='POLARIS v1.0, Chaney et al. (2019), Water Resour. Res. 55:2916'))
+      tops = [float(d.split('_')[0]) / 100.0 for d in self.polaris_depths]
+      bots = [float(d.split('_')[1]) / 100.0 for d in self.polaris_depths]
+      data_vars['soil_depth_top'] = (['soil_depth'], np.array(tops), {'units': 'm', 'long_name': 'top of the depth interval'})
+      data_vars['soil_depth_bottom'] = (['soil_depth'], np.array(bots), {'units': 'm', 'long_name': 'bottom of the depth interval'})
+
     if self.bldgs_fp_url:
       target_raster = self.bldgs_lod1_fp if self.lod == 1 else self.bldgs_fp_fp
       with rasterio.open(target_raster) as src:
@@ -991,6 +1097,9 @@ if __name__ == '__main__':
   if nlcd_str.startswith('http') and nlcd_str.lower().endswith('.zip'):
     FGP.prepareNlcdSource()
     
+  if FGP.polaris_url:
+    FGP.downloadPolaris()
+
   if FGP.bldgs_fp_url:
     FGP.retrieveBuildingFootprints()
     
@@ -1021,6 +1130,9 @@ if __name__ == '__main__':
   
   FGP.processRaster(FGP.elev_mp, FGP.elev_fp, Resampling.average)
   FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, Resampling.nearest)
+
+  if FGP.polaris_url:
+    FGP.processPolaris()
   
   if FGP.bldgs_fp_url:
     FGP.processBuildings()

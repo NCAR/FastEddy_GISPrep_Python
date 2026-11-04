@@ -27,5 +27,15 @@ python -m FE_GISPrep_Python {/path/to/parameter/file}
 ## Output
 The output GIS NetCDF file matches the specifications required by FastEddy GeoSpec.py.
 
+## Optional soil data (POLARIS)
+For the FastEddy land-surface model, setting `polaris_url` (for example `http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0`)
+adds POLARIS soil properties (Chaney et al. 2019, Water Resources Research 55:2916; 30 m, CONUS only). The 1 x 1 degree
+tiles covering the buffered domain are downloaded for each variable in `polaris_vars` (default `sand`, `silt`, `clay`, in %),
+statistic `polaris_stat` (default `mean`) and depth interval in `polaris_depths` (default all six, `0_5` to `100_200` cm),
+merged, and area-averaged onto the FastEddy grid. Each variable is written with dimensions `(soil_depth, y, x)`, together
+with `soil_depth_top` and `soil_depth_bottom` (m). Each tile is about 30 MB, so a domain inside one tile needs about
+550 MB for the default variables and depths. GeoSpec.py (`soil_opt = 1`) turns sand, silt and clay into USDA texture
+classes for the LSM.
+
 ## Requirements
 Python 3.12+
