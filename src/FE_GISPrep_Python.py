@@ -28,6 +28,7 @@ from rasterio.vrt import WarpedVRT
 from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.windows import from_bounds
 import requests
+from scipy import ndimage
 from shapely import wkb
 import xarray as xr
 
@@ -48,6 +49,15 @@ SOIL_SOURCES = {
   'polaris': 'POLARIS v1.0, Chaney et al. (2019), Water Resour. Res. 55:2916',
   'soilgrids': 'SoilGrids 2.0, Poggio et al. (2021), SOIL 7:217, CC-BY 4.0',
 }
+
+
+def fill_nearest(arr, valid):
+  '''
+  Fills the cells where valid is False with the value of the nearest valid cell (any distance). Used for
+  categorical fields, and for gaps larger than the fillnodata search distance.
+  '''
+  idx = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+  return arr[tuple(idx)]
 
 
 def fallback_utm_crs(lon, lat=None):
@@ -1296,13 +1306,13 @@ class FE_GISPrep:
 
     elev = np.where(elev == -9999, np.nan, elev)
     elev = fillnodata(elev, mask=~np.isnan(elev))
-    # land-cover classes: no-data cells (source no-data value, or 0 outside every CORINE polygon) are filled
-    # from neighbouring cells; written as integer class codes
+    # land-cover classes: no-data cells (source no-data value, or 0 outside every CORINE polygon) take the class
+    # of the nearest valid cell (no interpolation of class codes); written as integer class codes
     nlcd_valid = nlcd != nlcd_nodata if nlcd_nodata is not None else np.ones(nlcd.shape, dtype=bool)
     if not np.any(nlcd_valid):
       logging.error(f'The {self.landcover_source} land cover has no data in the domain')
       sys.exit(1)
-    nlcd = fillnodata(nlcd, mask=nlcd_valid).astype(np.int16)
+    nlcd = fill_nearest(nlcd, nlcd_valid).astype(np.int16)
 
     elev = np.flip(elev, axis=0)
     nlcd = np.flip(nlcd, axis=0)
@@ -1359,7 +1369,12 @@ class FE_GISPrep:
             coverage = ' (POLARIS covers CONUS only)' if self.soil_source == 'polaris' else ''
             logging.error(f'{self.soil_source} {var} {depth} cm has no data in the domain{coverage}')
             sys.exit(1)
-          arr = fillnodata(arr, mask=~np.isnan(arr)) * scale
+          arr = fillnodata(arr, mask=~np.isnan(arr))
+          if np.any(np.isnan(arr)):
+            # gaps wider than the fillnodata search distance (e.g. a city centre in SoilGrids at 10 m)
+            logging.info(f'{self.soil_source} {var} {depth} cm: {int(np.isnan(arr).sum())} cells filled from the nearest valid cell')
+            arr = fill_nearest(arr, ~np.isnan(arr))
+          arr = arr * scale
           layers.append(np.flip(arr, axis=0))
         data_vars[var] = (['soil_depth', 'y', 'x'], np.stack(layers).astype(np.float32),
                           dict(data_attrs, units=units.get(var, ''),
