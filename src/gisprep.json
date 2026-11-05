@@ -11,5 +11,20 @@
   "elev_url": "https://tnmaccess.nationalmap.gov/api/v1/products",
   "nlcd_url": "https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annual_NLCD_LndCov_2024_CU_C1V1.zip",
   "buildings_fp_url": "s3://overturemaps-us-west-2/release",
-  "lidar_url": "https://tnmaccess.nationalmap.gov/api/v1/products"
+  "lidar_url": "https://tnmaccess.nationalmap.gov/api/v1/products",
+  "polaris_url": "http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0",
+  "polaris_vars": [
+    "sand",
+    "silt",
+    "clay"
+  ],
+  "polaris_stat": "mean",
+  "polaris_depths": [
+    "0_5",
+    "5_15",
+    "15_30",
+    "30_60",
+    "60_100",
+    "100_200"
+  ]
 }
