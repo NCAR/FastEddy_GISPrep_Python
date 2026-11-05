@@ -25,6 +25,16 @@ lod = 0
 # strict (default): additional "spike" control; loose: 90th percentile threshold only
 height_filters = 'strict'
 
+# Optional projection (default: LCC tangent at lat_0/lon_0, the domain center).
+# Set these to match a parent model grid, e.g. a WRF Lambert Conformal domain
+# (TRUELAT1, TRUELAT2, STAND_LON, sphere radius 6370000 m). lat_0/lon_0 remain the
+# domain center and the domain axes are aligned with the projection x/y axes.
+# proj_lat_1 = 44.5
+# proj_lat_2 = 44.5
+# proj_lat_0 = 44.5
+# proj_lon_0 = -102.5
+# proj_R = 6370000.0
+
 ## - ##
 
 ## - Data paths - ##
@@ -38,12 +48,20 @@ base_path = '/path/to/output/directory'
 # Elevation
 # These are stored as tiles. The default url below can be queried for data falling with the domain.
 elev_url = 'https://tnmaccess.nationalmap.gov/api/v1/products'
+# Optional: TNM elevation product and download-URL filter (default: 1 m DEM).
+# For large/coarse domains use the seamless 1 arc-second (~30 m) DEM; only the
+# newest version of each 1x1 degree tile is downloaded.
+# elev_dataset = 'National Elevation Dataset (NED) 1 arc-second'
+# elev_url_filter = '/Elevation/1/TIFF/'
 
 # NLCD
 # This is a CONUS dataset. Code will download and unzip from the default url below.
 # Optionally, point to a local copy.
 nlcd_url = 'https://www.mrlc.gov/downloads/sciweb1/shared/mrlc/data-bundles/Annual_NLCD_LndCov_2024_CU_C1V1.zip'
 # nlcd_url = '/path/to/local/copy'
+# Optional: resampling of land cover to cell_size (rasterio Resampling name; default 'nearest').
+# 'mode' assigns the majority class when cell_size is much coarser than 30 m.
+# nlcd_resampling = 'mode'
 
 # - #
 

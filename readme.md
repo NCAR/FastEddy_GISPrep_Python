@@ -24,6 +24,12 @@ Navigate to src and modify the parameter file to the target domain specification
 
 python -m FE_GISPrep_Python {/path/to/parameter/file}
 
+### Optional parameters
+- `proj_lat_1`, `proj_lat_2`, `proj_lat_0`, `proj_lon_0`, `proj_R`: define the Lambert Conformal projection independently of the domain center (`lat_0`, `lon_0`), e.g. to match a WRF parent domain (`TRUELAT1`, `TRUELAT2`, `STAND_LON`, `R = 6370000`). The domain is centered on `lat_0`/`lon_0` with its axes along the projection x/y axes, and the download bounding box is computed from the projected domain.
+- `elev_dataset`, `elev_url_filter`: TNM elevation product and URL filter (default: 1 m DEM). For large domains use `'National Elevation Dataset (NED) 1 arc-second'` with `'/Elevation/1/TIFF/'`; only the newest version of each 1x1 degree tile is downloaded.
+- `nlcd_resampling`: rasterio resampling method for land cover (default `'nearest'`; `'mode'` recommended for coarse `cell_size`).
+- Set `buildings_fp_url = ''` and `lidar_url = ''` to exclude buildings.
+
 ## Output
 The output GIS NetCDF file matches the specifications required by FastEddy GeoSpec.py.
 

@@ -210,9 +210,52 @@ class FE_GISPrep:
     logging.info(f'Building Level of Detail (LOD) set to: {self.lod}')
     logging.info(f'Height filter parameters set to: {self.height_filters}')
 
-    self.db = (
-      int(self.dw/-2), int(self.dh/-2), int(self.dw/2), int(self.dh/2)
-    )
+    # Optional projection definition decoupled from the domain center (e.g. to match
+    # a WRF parent: proj_lat_1/proj_lat_2 = TRUELAT1/2, proj_lon_0 = STAND_LON,
+    # proj_R = 6370000). Without proj_lon_0 the default LCC tangent at the domain
+    # center is used.
+    self.custom_proj = 'proj_lon_0' in setup_params
+    if self.custom_proj:
+      self.proj_lon_0 = setup_params['proj_lon_0']
+      self.proj_lat_1 = setup_params.get('proj_lat_1', self.lat_0)
+      self.proj_lat_2 = setup_params.get('proj_lat_2', self.proj_lat_1)
+      self.proj_lat_0 = setup_params.get('proj_lat_0', self.proj_lat_1)
+      self.proj_R = setup_params.get('proj_R')
+      self.proj_string = (
+        f'+proj=lcc +lon_0={self.proj_lon_0} +lat_0={self.proj_lat_0} '
+        f'+lat_1={self.proj_lat_1} +lat_2={self.proj_lat_2} +units=m +no_defs'
+      )
+      if self.proj_R:
+        self.proj_string += f' +R={self.proj_R}'
+    else:
+      self.proj_lon_0 = self.lon_0
+      self.proj_lat_0 = self.proj_lat_1 = self.proj_lat_2 = self.lat_0
+      self.proj_R = None
+      self.proj_string = (
+        f'+proj=lcc +lon_0={self.lon_0} +lat_0={self.lat_0} '
+        f'+lat_1={self.lat_0} +lat_2={self.lat_0}'
+      )
+    logging.info(f'proj-string: {self.proj_string}')
+
+    if self.custom_proj:
+      # Center the domain on (lat_0, lon_0) within the projection plane
+      t = Transformer.from_crs('EPSG:4326', CRS.from_proj4(self.proj_string), always_xy=True)
+      xc, yc = t.transform(self.lon_0, self.lat_0)
+      logging.info(f'Domain center in projection coordinates: ({xc:.2f}, {yc:.2f}) m')
+      self.db = (
+        xc - self.dw/2, yc - self.dh/2, xc + self.dw/2, yc + self.dh/2
+      )
+    else:
+      self.db = (
+        int(self.dw/-2), int(self.dh/-2), int(self.dw/2), int(self.dh/2)
+      )
+
+    # Elevation product (TNM dataset name and download-URL filter) and resampling
+    self.elev_dataset = setup_params.get('elev_dataset', 'Digital Elevation Model (DEM) 1 meter')
+    self.elev_url_filter = setup_params.get('elev_url_filter', '/Elevation/1m/')
+    self.nlcd_resampling = Resampling[setup_params.get('nlcd_resampling', 'nearest')]
+    logging.info(f'Elevation dataset: {self.elev_dataset} (URL filter: {self.elev_url_filter})')
+    logging.info(f'NLCD resampling: {self.nlcd_resampling.name}')
 
     self.base_path = Path(setup_params['base_path'])
     
@@ -262,12 +305,6 @@ class FE_GISPrep:
     self.nc_fp = self.base_path.joinpath(f'{self.dname}_gis.nc')
     logging.info(f'NetCDF output file: {self.nc_fp}')
 
-    self.proj_string = (
-      f'+proj=lcc +lon_0={self.lon_0} +lat_0={self.lat_0} '
-      f'+lat_1={self.lat_0} +lat_2={self.lat_0}'
-    )
-    logging.info(f'proj-string: {self.proj_string}')
-
     # Initialize empty lists to store targeted file paths
     self.elev_files = []
     self.laz_files = []
@@ -285,6 +322,26 @@ class FE_GISPrep:
       Size of the spatial buffer relative to the domain (default is 0.05 / 5%).
     '''
     logging.info('Calculating buffered domain...')
+    if self.custom_proj:
+      # Transform the buffered projected box (densified edges) to geographic bounds;
+      # a center/cos(lat) estimate clips corners of large or off-origin domains.
+      bx = 0.5 * buffer_size * self.dw
+      by = 0.5 * buffer_size * self.dh
+      w, s, e, n = transform_bounds(
+        self.proj_string, 'EPSG:4326',
+        self.db[0] - bx, self.db[1] - by, self.db[2] + bx, self.db[3] + by,
+        densify_pts=101
+      )
+      self.lat_buff_s = math.floor(s * 1e4) / 1e4
+      self.lat_buff_n = math.ceil(n * 1e4) / 1e4
+      self.lon_buff_w = math.floor(w * 1e4) / 1e4
+      self.lon_buff_e = math.ceil(e * 1e4) / 1e4
+      logging.info(
+        f'Buffered domain: (({self.lat_buff_s}, {self.lon_buff_w}), '
+        f'({self.lat_buff_n}, {self.lon_buff_e})).\n'
+      )
+      return
+
     total_x = self.dw * (1.0 + buffer_size)
     total_y = self.dh * (1.0 + buffer_size)
     
@@ -602,10 +659,10 @@ class FE_GISPrep:
           
       for item in items:
         url = item.get('downloadURL', '')
-        # Only add valid formats (LiDAR ends with laz, DEM requires /1m/ filter)
+        # Only add valid formats (LiDAR ends with laz, DEM requires the elev_url_filter, default /1m/)
         if format_name == 'LAZ' and url.lower().endswith('.laz'):
           urls.append(url)
-        elif format_name == 'GeoTIFF' and '/Elevation/1m/' in url and url.lower().endswith(('.tif', '.tiff')):
+        elif format_name == 'GeoTIFF' and self.elev_url_filter in url and url.lower().endswith(('.tif', '.tiff')):
           urls.append(url)
                   
       params['offset'] += len(items)
@@ -613,9 +670,44 @@ class FE_GISPrep:
         break
               
     urls = list(set(urls))
+    if format_name == 'GeoTIFF':
+      urls = self.newestSeamlessTiles(urls)
     logging.info(f'Number of matching tiles: {len(urls)}.')
       
     return urls
+
+
+  def newestSeamlessTiles(self, urls):
+    '''
+    Keeps only the newest version of each seamless 1x1 degree DEM tile
+    (e.g. USGS_1_n45w099_20220105.tif; an undated name is the current release).
+    Other products (e.g. 1 m project tiles) are returned unchanged.
+
+    Parameters
+    ----------
+    urls : list
+      Download URLs returned by the TNM API.
+
+    Returns
+    -------
+    list
+      URLs with superseded seamless-tile versions removed.
+    '''
+    pattern = re.compile(r'(USGS_\d+_[ns]\d+[ew]\d+)(?:_(\d{8}))?\.tiff?$', re.IGNORECASE)
+    newest = {}
+    other = []
+    for url in urls:
+      match = pattern.search(url.split('/')[-1])
+      if not match:
+        other.append(url)
+        continue
+      tile, date = match.group(1), match.group(2) or '99999999'
+      if tile not in newest or date > newest[tile][0]:
+        newest[tile] = (date, url)
+
+    if newest:
+      logging.info(f'Seamless DEM: kept newest of {len(urls) - len(other)} versions for {len(newest)} tiles.')
+    return other + [url for _, url in newest.values()]
 
 
   def downloadTiles(self, urls, tile_path):
@@ -934,8 +1026,9 @@ class FE_GISPrep:
     (latitude/longitude) arrays for the NetCDF output.
     '''
     logging.info('Creating x and y indices...')
-    self.xs = np.arange(self.db[0], self.db[2], self.cs)
-    self.ys = np.arange(self.db[1], self.db[3], self.cs)
+    # Same counts as processRaster (float-safe when the bounds are not integers)
+    self.xs = self.db[0] + self.cs * np.arange(int((self.db[2] - self.db[0]) / self.cs))
+    self.ys = self.db[1] + self.cs * np.arange(int((self.db[3] - self.db[1]) / self.cs))
 
     xy = np.meshgrid(self.xs, self.ys)
     logging.info('Index creation complete.')
@@ -990,9 +1083,9 @@ class FE_GISPrep:
       
       'crs': ([], 0, {
         'grid_mapping_name': 'lambert_conformal_conic',
-        'longitude_of_central_meridian': self.lon_0,
-        'latitude_of_projection_origin': self.lat_0,
-        'standard_parallel': [self.lat_0, self.lat_0], 
+        'longitude_of_central_meridian': self.proj_lon_0,
+        'latitude_of_projection_origin': self.proj_lat_0,
+        'standard_parallel': [self.proj_lat_1, self.proj_lat_2],
         'false_easting': 0.0,
         'false_northing': 0.0,
         'crs_wkt': wkt_str,      
@@ -1084,7 +1177,7 @@ if __name__ == '__main__':
   if FGP.elev_fp.is_file() or FGP.elev_mp.is_file():
     logging.info('Elevation data already processed or mosaiced. Skipping TNM API query.')
   else:
-    elev_urls = FGP.query_tnm_api('Digital Elevation Model (DEM) 1 meter', 'GeoTIFF')
+    elev_urls = FGP.query_tnm_api(FGP.elev_dataset, 'GeoTIFF')
     if elev_urls:
       FGP.downloadTiles(elev_urls, FGP.elev_tp)
       # Store ONLY the specific intersecting files required for this domain
@@ -1127,9 +1220,8 @@ if __name__ == '__main__':
   
   if FGP.lidar_url and FGP.bldgs_fp_url:
     FGP.extractLidarHeights()
-  
-  FGP.processRaster(FGP.elev_mp, FGP.elev_fp, Resampling.average)
-  FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, Resampling.nearest)
+    
+  FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, FGP.nlcd_resampling)
 
   if FGP.polaris_url:
     FGP.processPolaris()
