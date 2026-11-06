@@ -28,11 +28,53 @@ from rasterio.vrt import WarpedVRT
 from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.windows import from_bounds
 import requests
+from scipy import ndimage
 from shapely import wkb
 import xarray as xr
 
 
-def process_laz_worker(file, proj_string, elev_mp, lon_0, db, cs, height_filters, mode='raster', gdf_bldgs=None):
+# Open-access global and European data sources (no account needed)
+COPERNICUS_DEM_URL = 'https://copernicus-dem-30m.s3.amazonaws.com'
+WORLDCOVER_URL = 'https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map'
+CORINE_URL = 'https://image.discomap.eea.europa.eu/arcgis/rest/services/Corine/CLC2018_LAEA/MapServer/0'
+SOILGRIDS_URL = 'https://files.isric.org/soilgrids/latest/data'
+
+LANDCOVER_SOURCES = {
+  'nlcd': 'USGS Annual NLCD land cover (CONUS)',
+  'worldcover': 'ESA WorldCover 10 m 2021 v200 (Zanaga et al. 2022), CC-BY 4.0',
+  'corine': 'CORINE Land Cover 2018 (CLC2018, level-3 codes), Copernicus Land Monitoring Service, EEA',
+}
+SOIL_NAMES = {'polaris': 'POLARIS', 'soilgrids': 'SoilGrids 2.0'}
+SOIL_SOURCES = {
+  'polaris': 'POLARIS v1.0, Chaney et al. (2019), Water Resour. Res. 55:2916',
+  'soilgrids': 'SoilGrids 2.0, Poggio et al. (2021), SOIL 7:217, CC-BY 4.0',
+}
+
+
+def fill_nearest(arr, valid):
+  '''
+  Fills the cells where valid is False with the value of the nearest valid cell (any distance). Used for
+  categorical fields, and for gaps larger than the fillnodata search distance.
+  '''
+  idx = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+  return arr[tuple(idx)]
+
+
+def fallback_utm_crs(lon, lat=None):
+  '''
+  UTM CRS assumed for LAZ files without a CRS record: NAD83 UTM over North America (zones 1-23),
+  ETRS89 UTM over Europe (zones 28-38), WGS 84 UTM elsewhere (north or south by the latitude).
+  '''
+  zone = math.floor((lon + 180) / 6) + 1
+  if lat is None or (lat >= 0 and zone <= 23 and lon < -50):
+    return CRS.from_epsg(26900 + zone)
+  if 34 <= lat <= 72 and 28 <= zone <= 38:
+    return CRS.from_epsg(25800 + zone)
+  return CRS.from_epsg((32600 if lat >= 0 else 32700) + zone)
+
+
+def process_laz_worker(file, proj_string, elev_mp, lon_0, db, cs, height_filters, mode='raster', gdf_bldgs=None,
+                       lat_0=None):
   '''
   Standalone worker for extracting building heights from LAZ point clouds.
   Handles both vector (polygon) and raster (gridded) LOD generation.
@@ -92,8 +134,7 @@ def process_laz_worker(file, proj_string, elev_mp, lon_0, db, cs, height_filters
   if native_crs_wkt:
     native_crs = CRS.from_wkt(native_crs_wkt[0].string)
   else:
-    utm_zone = math.floor((lon_0 + 180) / 6) + 1
-    native_crs = CRS.from_epsg(26900 + utm_zone)
+    native_crs = fallback_utm_crs(lon_0, lat_0)
 
   transformer = Transformer.from_crs(native_crs, master_crs, always_xy=True)
   x_proj, y_proj = transformer.transform(x_raw, y_raw)
@@ -253,24 +294,48 @@ class FE_GISPrep:
     # Elevation product (TNM dataset name and download-URL filter) and resampling
     self.elev_dataset = setup_params.get('elev_dataset', 'Digital Elevation Model (DEM) 1 meter')
     self.elev_url_filter = setup_params.get('elev_url_filter', '/Elevation/1m/')
-    self.nlcd_resampling = Resampling[setup_params.get('nlcd_resampling', 'nearest')]
-    logging.info(f'Elevation dataset: {self.elev_dataset} (URL filter: {self.elev_url_filter})')
-    logging.info(f'NLCD resampling: {self.nlcd_resampling.name}')
+    self.nlcd_resampling = Resampling[
+      setup_params.get('landcover_resampling', setup_params.get('nlcd_resampling', 'nearest'))
+    ]
+    logging.info(f'Land-cover resampling: {self.nlcd_resampling.name}')
 
     self.base_path = Path(setup_params['base_path'])
-    
-    self.elev_url = setup_params['elev_url']
+
+    # Elevation source: 'tnm' (USGS 3DEP via the TNM API, default) or 'copernicus' (Copernicus DEM GLO-30, global,
+    # 1 x 1 degree COG tiles on AWS open data)
+    self.elev_source = setup_params.get('elev_source', 'tnm').lower()
+    if self.elev_source == 'tnm':
+      self.elev_url = setup_params['elev_url']
+      logging.info(f'Elevation dataset: {self.elev_dataset} (URL filter: {self.elev_url_filter})')
+    elif self.elev_source == 'copernicus':
+      self.elev_url = setup_params.get('elev_url', COPERNICUS_DEM_URL).rstrip('/')
+    else:
+      logging.error(f"elev_source = '{self.elev_source}' (use 'tnm' or 'copernicus')")
+      sys.exit(1)
     self.elev_tp = self.base_path.joinpath('elev_tiles')
     self.elev_mp = self.base_path.joinpath(f'{self.dname}_elev_mosaic.tif')
     self.elev_fp = self.base_path.joinpath(f'{self.dname}_elev.tif')
-    logging.info(f'Elevation data source: {self.elev_url}')
+    logging.info(f'Elevation data source ({self.elev_source}): {self.elev_url}')
     logging.info(f'Elevation final path: {self.elev_fp}')
 
-    self.nlcd_url = setup_params['nlcd_url']
-    self.nlcd_bp = self.base_path.joinpath(f'{self.dname}_nlcd_buffered.tif')
-    self.nlcd_fp = self.base_path.joinpath(f'{self.dname}_nlcd.tif')
-    logging.info(f'NLCD data source: {self.nlcd_url}')
-    logging.info(f'NLCD final path: {self.nlcd_fp}')
+    # Land-cover source: 'nlcd' (CONUS, default), 'worldcover' (ESA WorldCover 10 m, global) or 'corine'
+    # (CORINE Land Cover 2018, Europe, polygons from the EEA map service). The nlcd_* attributes hold the
+    # buffered and final land-cover rasters of whichever source is used.
+    self.landcover_source = setup_params.get('landcover_source', 'nlcd').lower()
+    if self.landcover_source == 'nlcd':
+      self.nlcd_url = setup_params['nlcd_url']
+    elif self.landcover_source == 'worldcover':
+      self.nlcd_url = setup_params.get('worldcover_url', WORLDCOVER_URL).rstrip('/')
+    elif self.landcover_source == 'corine':
+      self.nlcd_url = setup_params.get('corine_url', CORINE_URL).rstrip('/')
+      self.corine_gp = self.base_path.joinpath(f'{self.dname}_corine_buffered.gpkg')
+    else:
+      logging.error(f"landcover_source = '{self.landcover_source}' (use 'nlcd', 'worldcover' or 'corine')")
+      sys.exit(1)
+    self.nlcd_bp = self.base_path.joinpath(f'{self.dname}_{self.landcover_source}_buffered.tif')
+    self.nlcd_fp = self.base_path.joinpath(f'{self.dname}_{self.landcover_source}.tif')
+    logging.info(f'Land-cover data source ({self.landcover_source}): {self.nlcd_url}')
+    logging.info(f'Land-cover final path: {self.nlcd_fp}')
 
     self.bldgs_fp_url = setup_params.get('buildings_fp_url', '')
     if self.bldgs_fp_url:
@@ -288,19 +353,32 @@ class FE_GISPrep:
       self.lidar_url = None
       logging.info('No building file data provided.')
 
-    # POLARIS soil properties (Chaney et al. 2019, WRR), 30 m, CONUS only; optional ('' or absent = off)
+    # Soil properties per depth interval; optional. soil_source 'polaris' (Chaney et al. 2019, WRR; 30 m, CONUS
+    # only; also selected by a non-empty polaris_url) or 'soilgrids' (ISRIC SoilGrids 2.0, Poggio et al. 2021;
+    # 250 m, global). Both give sand/silt/clay at the same six depth intervals.
     self.polaris_url = setup_params.get('polaris_url', '')
-    if self.polaris_url:
-      self.polaris_url = self.polaris_url.rstrip('/')
-      self.polaris_vars = setup_params.get('polaris_vars', ['sand', 'silt', 'clay'])
-      self.polaris_stat = setup_params.get('polaris_stat', 'mean')
-      self.polaris_depths = setup_params.get('polaris_depths', ['0_5', '5_15', '15_30', '30_60', '60_100', '100_200'])
-      self.polaris_tp = self.base_path.joinpath('polaris_tiles')
-      logging.info(f'POLARIS data source: {self.polaris_url} ({self.polaris_stat} of {self.polaris_vars}, '
-                   f'depths {self.polaris_depths} cm)')
+    self.soil_source = setup_params.get('soil_source', 'polaris' if self.polaris_url else '').lower()
+    if self.soil_source:
+      if self.soil_source == 'polaris':
+        if not self.polaris_url:
+          logging.error("soil_source = 'polaris' needs polaris_url")
+          sys.exit(1)
+        self.polaris_url = self.polaris_url.rstrip('/')
+        self.polaris_tp = self.base_path.joinpath('polaris_tiles')
+      elif self.soil_source == 'soilgrids':
+        self.polaris_url = setup_params.get('soilgrids_url', SOILGRIDS_URL).rstrip('/')
+      else:
+        logging.error(f"soil_source = '{self.soil_source}' (use 'polaris' or 'soilgrids')")
+        sys.exit(1)
+      self.polaris_vars = setup_params.get('soil_vars', setup_params.get('polaris_vars', ['sand', 'silt', 'clay']))
+      self.polaris_stat = setup_params.get('soil_stat', setup_params.get('polaris_stat', 'mean'))
+      self.polaris_depths = setup_params.get('soil_depths', setup_params.get(
+        'polaris_depths', ['0_5', '5_15', '15_30', '30_60', '60_100', '100_200']))
+      logging.info(f'Soil data source ({self.soil_source}): {self.polaris_url} ({self.polaris_stat} of '
+                   f'{self.polaris_vars}, depths {self.polaris_depths} cm)')
     else:
       self.polaris_url = None
-      logging.info('No POLARIS soil data requested.')
+      logging.info('No soil data requested.')
 
     self.nc_fp = self.base_path.joinpath(f'{self.dname}_gis.nc')
     logging.info(f'NetCDF output file: {self.nc_fp}')
@@ -449,7 +527,7 @@ class FE_GISPrep:
       future_to_file = {
         executor.submit(
           process_laz_worker, file, self.proj_string, self.elev_mp, self.lon_0, 
-          self.db, self.cs, self.height_filters, 'polygon', gdf_bldgs_proj
+          self.db, self.cs, self.height_filters, 'polygon', gdf_bldgs_proj, lat_0=self.lat_0
         ): file for file in laz_files
       }
       
@@ -551,7 +629,7 @@ class FE_GISPrep:
             future_to_file = {
               executor.submit(
                 process_laz_worker, file, self.proj_string, self.elev_mp, self.lon_0, 
-                self.db, self.cs, self.height_filters, 'raster'
+                self.db, self.cs, self.height_filters, 'raster', lat_0=self.lat_0
               ): file for file in laz_files
             }
             
@@ -864,14 +942,13 @@ class FE_GISPrep:
     Performs a memory-efficient windowed read of the national NLCD dataset,
     extracting only the pixels within the buffered domain bounds.
     '''
-    left, bottom, right, top = transform_bounds(
-      'EPSG:4326', 'EPSG:5070', 
-      self.lon_buff_w, self.lat_buff_s, self.lon_buff_e, self.lat_buff_n
-    )
-
     logging.info(f'Opening NLCD source: {self.nlcd_url}')
     
     with rasterio.open(self.nlcd_url) as src:
+      left, bottom, right, top = transform_bounds(
+        'EPSG:4326', src.crs,
+        self.lon_buff_w, self.lat_buff_s, self.lon_buff_e, self.lat_buff_n
+      )
       window = from_bounds(left, bottom, right, top, src.transform)
       window = window.round_lengths().round_offsets()
       
@@ -895,6 +972,177 @@ class FE_GISPrep:
     logging.info('NLCD clipping complete!')
 
 
+  def remoteExists(self, url):
+    '''
+    True if a remote file exists (HTTP HEAD 200). Global tile sets have no tiles over open ocean.
+    '''
+    try:
+      return requests.head(url, timeout=60, allow_redirects=True).status_code == 200
+    except requests.RequestException:
+      return False
+
+
+  def copernicusTiles(self):
+    '''
+    Lists the Copernicus DEM GLO-30 1 x 1 degree COG tiles (EPSG:4326) that cover the buffered domain and exist
+    (there are none over open ocean).
+
+    Returns
+    -------
+    list of str
+      Tile URLs such as .../Copernicus_DSM_COG_10_N37_00_W002_00_DEM/Copernicus_DSM_COG_10_N37_00_W002_00_DEM.tif.
+    '''
+    urls = []
+    for la in range(math.floor(self.lat_buff_s), math.ceil(self.lat_buff_n)):
+      for lo in range(math.floor(self.lon_buff_w), math.ceil(self.lon_buff_e)):
+        name = (f"Copernicus_DSM_COG_10_{'N' if la >= 0 else 'S'}{abs(la):02d}_00_"
+                f"{'E' if lo >= 0 else 'W'}{abs(lo):03d}_00_DEM")
+        url = f'{self.elev_url}/{name}/{name}.tif'
+        if self.remoteExists(url):
+          urls.append(url)
+        else:
+          logging.info(f'  No Copernicus DEM tile {name} (open ocean)')
+    return urls
+
+
+  def worldcoverTiles(self):
+    '''
+    Lists the ESA WorldCover 3 x 3 degree tiles (EPSG:4326, named by their SW corner) that cover the buffered
+    domain and exist.
+    '''
+    urls = []
+    for la in range(3 * math.floor(self.lat_buff_s / 3), math.ceil(self.lat_buff_n), 3):
+      for lo in range(3 * math.floor(self.lon_buff_w / 3), math.ceil(self.lon_buff_e), 3):
+        name = (f"ESA_WorldCover_10m_2021_v200_{'N' if la >= 0 else 'S'}{abs(la):02d}"
+                f"{'E' if lo >= 0 else 'W'}{abs(lo):03d}_Map.tif")
+        url = f'{self.nlcd_url}/{name}'
+        if self.remoteExists(url):
+          urls.append(url)
+        else:
+          logging.info(f'  No WorldCover tile {name} (open ocean)')
+    return urls
+
+
+  def bufferedLandCover(self):
+    '''
+    Writes the land cover of the buffered domain to nlcd_bp (NLCD, WorldCover), or the CORINE polygons of the
+    buffered domain to corine_gp.
+    '''
+    if self.landcover_source == 'nlcd':
+      self.bufferedNLCD()
+    elif self.landcover_source == 'worldcover':
+      self.bufferedWorldCover()
+    elif self.landcover_source == 'corine':
+      self.bufferedCorine()
+
+
+  def bufferedWorldCover(self):
+    '''
+    Reads only the buffered domain from the WorldCover COG tiles (HTTP range requests, no full-tile download)
+    and writes it as one GeoTIFF (EPSG:4326, 10 m).
+    '''
+    if self.nlcd_bp.is_file():
+      logging.info(f'WorldCover buffered domain already exists at {self.nlcd_bp}.')
+      return
+    urls = self.worldcoverTiles()
+    if not urls:
+      logging.error('No WorldCover tiles cover the domain.')
+      sys.exit(1)
+    sources = [rasterio.open(f'/vsicurl/{u}') for u in urls]
+    try:
+      bounds = (self.lon_buff_w, self.lat_buff_s, self.lon_buff_e, self.lat_buff_n)
+      mosaic, out_trans = merge(sources, bounds=bounds)
+      out_meta = sources[0].meta.copy()
+    finally:
+      for src in sources:
+        src.close()
+    out_meta.update({'driver': 'GTiff', 'height': mosaic.shape[1], 'width': mosaic.shape[2],
+                     'transform': out_trans, 'compress': 'zstd', 'tiled': True})
+    with rasterio.open(self.nlcd_bp, 'w', **out_meta) as dest:
+      dest.write(mosaic)
+    logging.info(f'WorldCover buffered domain written: {self.nlcd_bp}')
+
+
+  def bufferedCorine(self):
+    '''
+    Queries the CORINE Land Cover 2018 polygons that intersect the buffered domain from the EEA map service
+    (GeoJSON, paged) and saves them, with their level-3 codes (Code_18), to corine_gp.
+    '''
+    if self.corine_gp.is_file():
+      logging.info(f'CORINE polygons already exist at {self.corine_gp}.')
+      return
+    params = {
+      'geometry': f'{self.lon_buff_w},{self.lat_buff_s},{self.lon_buff_e},{self.lat_buff_n}',
+      'geometryType': 'esriGeometryEnvelope', 'inSR': 4326, 'spatialRel': 'esriSpatialRelIntersects',
+      'outFields': 'Code_18', 'returnGeometry': 'true', 'outSR': 4326, 'f': 'geojson',
+      'orderByFields': 'OBJECTID', 'resultRecordCount': 1000,
+    }
+    features_all = []
+    offset = 0
+    while True:
+      r = requests.get(f'{self.nlcd_url}/query', params=dict(params, resultOffset=offset), timeout=300)
+      r.raise_for_status()
+      page = r.json().get('features', [])
+      features_all.extend(page)
+      logging.info(f'  CORINE polygons {offset} to {offset + len(page)}')
+      if len(page) < params['resultRecordCount']:
+        break
+      offset += len(page)
+    if not features_all:
+      logging.error('No CORINE polygons in the domain (CORINE covers the EEA member and cooperating countries).')
+      sys.exit(1)
+    gdf = gpd.GeoDataFrame.from_features(features_all, crs='EPSG:4326')
+    gdf['Code_18'] = gdf['Code_18'].astype(int)
+    gdf.to_file(self.corine_gp, driver='GPKG')
+    logging.info(f'{len(gdf)} CORINE polygons written: {self.corine_gp}')
+
+
+  def rasterizeCorine(self):
+    '''
+    Rasterizes the CORINE polygons onto the FastEddy master grid (the class of the polygon containing each cell
+    centre), written to nlcd_fp. Cells outside every polygon get 0 (no data).
+    '''
+    xmin, ymin, xmax, ymax = self.db
+    out_width = int((xmax - xmin) / self.cs)
+    out_height = int((ymax - ymin) / self.cs)
+    if self.nlcd_fp.is_file():
+      with rasterio.open(self.nlcd_fp) as chk:
+        if chk.width == out_width and chk.height == out_height:
+          logging.info(f'Final data already exists and matches target dimensions at {self.nlcd_fp}.\n')
+          return
+    out_transform = transform_from_bounds(xmin, ymin, xmax, ymax, out_width, out_height)
+    gdf = gpd.read_file(self.corine_gp).to_crs(self.proj_string)
+    arr = features.rasterize(zip(gdf.geometry, gdf['Code_18']), out_shape=(out_height, out_width),
+                             transform=out_transform, fill=0, dtype='int16')
+    with rasterio.open(self.nlcd_fp, 'w', driver='GTiff', width=out_width, height=out_height, count=1,
+                       dtype='int16', nodata=0, crs=self.proj_string, transform=out_transform,
+                       compress='zstd', tiled=True) as dst:
+      dst.write(arr, 1)
+    logging.info(f'CORINE rasterized onto the master grid: {self.nlcd_fp}\n')
+
+
+  def soilgridsMosaic(self, var, depth, mosaic_fp):
+    '''
+    Reads the buffered domain of one SoilGrids 2.0 variable and depth from the ISRIC virtual raster
+    (Homolosine, 250 m, HTTP range requests) and writes it as a GeoTIFF in the SoilGrids CRS.
+    Texture fractions are stored in g/kg; no data (e.g. water, built-up areas) is -32768.
+    '''
+    d = depth.replace('_', '-')
+    url = f'/vsicurl/{self.polaris_url}/{var}/{var}_{d}cm_{self.polaris_stat}.vrt'
+    with rasterio.open(url) as src:
+      left, bottom, right, top = transform_bounds(
+        'EPSG:4326', src.crs, self.lon_buff_w, self.lat_buff_s, self.lon_buff_e, self.lat_buff_n, densify_pts=101
+      )
+      window = from_bounds(left, bottom, right, top, src.transform).round_lengths().round_offsets()
+      arr = src.read(1, window=window)
+      out_meta = src.meta.copy()
+      out_meta.update({'driver': 'GTiff', 'height': arr.shape[0], 'width': arr.shape[1],
+                       'transform': src.window_transform(window), 'compress': 'zstd'})
+    with rasterio.open(mosaic_fp, 'w', **out_meta) as dest:
+      dest.write(arr, 1)
+    logging.info(f'SoilGrids {var} {depth} cm written: {mosaic_fp}')
+
+
   def polarisTiles(self):
     '''
     Lists the POLARIS 1 x 1 degree tiles (EPSG:4326) that cover the buffered domain.
@@ -911,10 +1159,10 @@ class FE_GISPrep:
 
   def polarisPath(self, var, depth, kind):
     '''
-    Local path of a POLARIS product for one variable and depth: kind 'mosaic' (tiles merged, EPSG:4326)
+    Local path of a soil product (POLARIS or SoilGrids) for one variable and depth: kind 'mosaic' (source grid)
     or 'final' (on the FastEddy grid).
     '''
-    return self.base_path.joinpath(f'{self.dname}_polaris_{var}_{self.polaris_stat}_{depth}_{kind}.tif')
+    return self.base_path.joinpath(f'{self.dname}_{self.soil_source}_{var}_{self.polaris_stat}_{depth}_{kind}.tif')
 
 
   def downloadPolaris(self):
@@ -936,14 +1184,17 @@ class FE_GISPrep:
 
   def processPolaris(self):
     '''
-    Merges the POLARIS tiles of each variable and depth and regrids them onto the FastEddy master grid
-    (area average, as for the elevation).
+    Merges the POLARIS tiles (or reads the SoilGrids window) of each variable and depth and regrids them onto the
+    FastEddy master grid (area average, as for the elevation).
     '''
-    tiles = self.polarisTiles()
+    tiles = self.polarisTiles() if self.soil_source == 'polaris' else []
     for var in self.polaris_vars:
       for depth in self.polaris_depths:
         mosaic_fp = self.polarisPath(var, depth, 'mosaic')
-        if not mosaic_fp.is_file() and not self.polarisPath(var, depth, 'final').is_file():
+        if self.soil_source == 'soilgrids':
+          if not mosaic_fp.is_file() and not self.polarisPath(var, depth, 'final').is_file():
+            self.soilgridsMosaic(var, depth, mosaic_fp)
+        elif not mosaic_fp.is_file() and not self.polarisPath(var, depth, 'final').is_file():
           tile_path = self.polaris_tp.joinpath(var, self.polaris_stat, depth)
           sources = [rasterio.open(tile_path.joinpath(f'{t}.tif')) for t in tiles]
           try:
@@ -1051,11 +1302,17 @@ class FE_GISPrep:
       elev = src.read(1)
     with rasterio.open(self.nlcd_fp) as src:
       nlcd = src.read(1)
+      nlcd_nodata = src.nodata
 
     elev = np.where(elev == -9999, np.nan, elev)
     elev = fillnodata(elev, mask=~np.isnan(elev))
-    nlcd = np.where(nlcd == -9999, np.nan, nlcd)
-    nlcd = fillnodata(nlcd, mask=~np.isnan(nlcd))
+    # land-cover classes: no-data cells (source no-data value, or 0 outside every CORINE polygon) take the class
+    # of the nearest valid cell (no interpolation of class codes); written as integer class codes
+    nlcd_valid = nlcd != nlcd_nodata if nlcd_nodata is not None else np.ones(nlcd.shape, dtype=bool)
+    if not np.any(nlcd_valid):
+      logging.error(f'The {self.landcover_source} land cover has no data in the domain')
+      sys.exit(1)
+    nlcd = fill_nearest(nlcd, nlcd_valid).astype(np.int16)
 
     elev = np.flip(elev, axis=0)
     nlcd = np.flip(nlcd, axis=0)
@@ -1079,7 +1336,8 @@ class FE_GISPrep:
       'lon': (['y', 'x'], self.lons, {'standard_name': 'longitude', 'units': 'degrees_east'}),
       
       'elevation': (['y', 'x'], elev, data_attrs),
-      'LandCover': (['y', 'x'], nlcd, data_attrs),
+      'LandCover': (['y', 'x'], nlcd, dict(data_attrs, long_name='land-cover class code',
+                                            source=LANDCOVER_SOURCES[self.landcover_source])),
       
       'crs': ([], 0, {
         'grid_mapping_name': 'lambert_conformal_conic',
@@ -1096,6 +1354,7 @@ class FE_GISPrep:
     if self.polaris_url:
       # soil properties per depth interval (soil_depth, y, x); no-data (e.g. open water) filled from neighbours
       units = {'sand': '%', 'silt': '%', 'clay': '%'}
+      scale = 0.1 if self.soil_source == 'soilgrids' else 1.0   # SoilGrids texture fractions are in g/kg
       for var in self.polaris_vars:
         layers = []
         for depth in self.polaris_depths:
@@ -1107,14 +1366,20 @@ class FE_GISPrep:
             bad |= (arr == nodata)
           arr = np.where(bad, np.nan, arr)
           if np.all(np.isnan(arr)):
-            logging.error(f'POLARIS {var} {depth} cm has no data in the domain (POLARIS covers CONUS only)')
+            coverage = ' (POLARIS covers CONUS only)' if self.soil_source == 'polaris' else ''
+            logging.error(f'{self.soil_source} {var} {depth} cm has no data in the domain{coverage}')
             sys.exit(1)
           arr = fillnodata(arr, mask=~np.isnan(arr))
+          if np.any(np.isnan(arr)):
+            # gaps wider than the fillnodata search distance (e.g. a city centre in SoilGrids at 10 m)
+            logging.info(f'{self.soil_source} {var} {depth} cm: {int(np.isnan(arr).sum())} cells filled from the nearest valid cell')
+            arr = fill_nearest(arr, ~np.isnan(arr))
+          arr = arr * scale
           layers.append(np.flip(arr, axis=0))
-        data_vars[var] = (['soil_depth', 'y', 'x'], np.stack(layers),
+        data_vars[var] = (['soil_depth', 'y', 'x'], np.stack(layers).astype(np.float32),
                           dict(data_attrs, units=units.get(var, ''),
-                               long_name=f'POLARIS {var} ({self.polaris_stat}) per depth interval',
-                               source='POLARIS v1.0, Chaney et al. (2019), Water Resour. Res. 55:2916'))
+                               long_name=f'{SOIL_NAMES[self.soil_source]} {var} ({self.polaris_stat}) per depth interval',
+                               source=SOIL_SOURCES[self.soil_source]))
       tops = [float(d.split('_')[0]) / 100.0 for d in self.polaris_depths]
       bots = [float(d.split('_')[1]) / 100.0 for d in self.polaris_depths]
       data_vars['soil_depth_top'] = (['soil_depth'], np.array(tops), {'units': 'm', 'long_name': 'top of the depth interval'})
@@ -1173,11 +1438,14 @@ if __name__ == '__main__':
 
   FGP.bufferedDomain()
 
-  # Check if we already have the elevation data locally before hitting the TNM API
+  # Check if we already have the elevation data locally before listing the tiles
   if FGP.elev_fp.is_file() or FGP.elev_mp.is_file():
-    logging.info('Elevation data already processed or mosaiced. Skipping TNM API query.')
+    logging.info('Elevation data already processed or mosaiced. Skipping the tile query.')
   else:
-    elev_urls = FGP.query_tnm_api(FGP.elev_dataset, 'GeoTIFF')
+    if FGP.elev_source == 'copernicus':
+      elev_urls = FGP.copernicusTiles()
+    else:
+      elev_urls = FGP.query_tnm_api(FGP.elev_dataset, 'GeoTIFF')
     if elev_urls:
       FGP.downloadTiles(elev_urls, FGP.elev_tp)
       # Store ONLY the specific intersecting files required for this domain
@@ -1187,10 +1455,10 @@ if __name__ == '__main__':
     
 
   nlcd_str = str(FGP.nlcd_url).strip()
-  if nlcd_str.startswith('http') and nlcd_str.lower().endswith('.zip'):
+  if FGP.landcover_source == 'nlcd' and nlcd_str.startswith('http') and nlcd_str.lower().endswith('.zip'):
     FGP.prepareNlcdSource()
     
-  if FGP.polaris_url:
+  if FGP.soil_source == 'polaris':
     FGP.downloadPolaris()
 
   if FGP.bldgs_fp_url:
@@ -1216,12 +1484,16 @@ if __name__ == '__main__':
         logging.warning('No LiDAR tiles found for this domain.')
 
   FGP.stitchElev(FGP.elev_mp)
-  FGP.bufferedNLCD()
+  FGP.bufferedLandCover()
   
   if FGP.lidar_url and FGP.bldgs_fp_url:
     FGP.extractLidarHeights()
-    
-  FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, FGP.nlcd_resampling)
+  
+  FGP.processRaster(FGP.elev_mp, FGP.elev_fp, Resampling.average)
+  if FGP.landcover_source == 'corine':
+    FGP.rasterizeCorine()
+  else:
+    FGP.processRaster(FGP.nlcd_bp, FGP.nlcd_fp, FGP.nlcd_resampling)
 
   if FGP.polaris_url:
     FGP.processPolaris()
