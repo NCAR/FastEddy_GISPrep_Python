@@ -1277,9 +1277,12 @@ class FE_GISPrep:
     (latitude/longitude) arrays for the NetCDF output.
     '''
     logging.info('Creating x and y indices...')
-    # Same counts as processRaster (float-safe when the bounds are not integers)
-    self.xs = self.db[0] + self.cs * np.arange(int((self.db[2] - self.db[0]) / self.cs))
-    self.ys = self.db[1] + self.cs * np.arange(int((self.db[3] - self.db[1]) / self.cs))
+    # Cell centres of the processRaster pixels (same counts and pixel size as its transform_from_bounds), so lat/lon,
+    # the map factors and the rotation are evaluated where the raster values (and the FastEddy mass points) are
+    nx = int((self.db[2] - self.db[0]) / self.cs)
+    ny = int((self.db[3] - self.db[1]) / self.cs)
+    self.xs = self.db[0] + (self.db[2] - self.db[0]) / nx * (np.arange(nx) + 0.5)
+    self.ys = self.db[1] + (self.db[3] - self.db[1]) / ny * (np.arange(ny) + 0.5)
 
     xy = np.meshgrid(self.xs, self.ys)
     logging.info('Index creation complete.')
@@ -1289,6 +1292,47 @@ class FE_GISPrep:
     t = Transformer.from_crs(crs, 4326) 
     self.lats, self.lons = t.transform(xy[0], xy[1])
     logging.info('Coordinate transform complete.')
+
+
+  def genMapFactors(self, delta=1.0):
+    '''
+    Generates the map scale factors and the grid rotation of the projection at the cell centres, with the
+    numerics of the FastEddy analytic map mode and coupler (centered differences of half-width delta along the
+    projection axes, geodesic distances on the projection's ellipsoid). Works for any CRS and does not assume
+    a conformal projection (mapfac_x and mapfac_y are computed separately).
+
+    Parameters
+    ----------
+    delta : float
+      Finite-difference half-width in projection metres.
+
+    Notes
+    -----
+    mapfac = (grid distance)/(Earth distance). The rotation angle alpha is counter-clockwise from true north to
+    the grid +y axis (alpha = -bearing), u_earth = u*cosalpha - v*sinalpha, v_earth = v*cosalpha + u*sinalpha,
+    the same convention as WRF SINALPHA/COSALPHA.
+    '''
+    logging.info('Computing map scale factors and grid rotation...')
+    crs = CRS.from_proj4(self.proj_string)
+    t = Transformer.from_crs(crs, crs.geodetic_crs, always_xy=True)
+    geod = crs.get_geod()
+    x, y = np.meshgrid(self.xs, self.ys)
+
+    lon_lo, lat_lo = t.transform(x - delta, y)
+    lon_hi, lat_hi = t.transform(x + delta, y)
+    self.mapfac_x = 2.0 * delta / geod.inv(lon_lo, lat_lo, lon_hi, lat_hi)[2]
+
+    lon_lo, lat_lo = t.transform(x, y - delta)
+    lon_hi, lat_hi = t.transform(x, y + delta)
+    bearing, _, dist = geod.inv(lon_lo, lat_lo, lon_hi, lat_hi)
+    self.mapfac_y = 2.0 * delta / dist
+    bearing = np.deg2rad(bearing)
+    self.sinalpha = -np.sin(bearing)
+    self.cosalpha = np.cos(bearing)
+    alpha = np.rad2deg(np.arctan2(self.sinalpha, self.cosalpha))
+    logging.info(f'mapfac_x = [{self.mapfac_x.min():.8f}, {self.mapfac_x.max():.8f}], '
+                 f'mapfac_y = [{self.mapfac_y.min():.8f}, {self.mapfac_y.max():.8f}], '
+                 f'alpha = [{alpha.min():.6f}, {alpha.max():.6f}] degrees')
 
 
   def gisNetCDF(self):
@@ -1322,6 +1366,15 @@ class FE_GISPrep:
     custom_crs_name = f'{self.dname}_LCC'
     wkt_str = wkt_str.replace('unknown', custom_crs_name, 1)
 
+    # Earth shape of the projection (CF): earth_radius for a sphere (e.g. proj_R = 6370000 to match WRF),
+    # semi_major_axis and inverse_flattening for an ellipsoid (the default LCC tangent projection)
+    ellipsoid_attrs = {k: v for k, v in crs_obj.to_cf().items()
+                       if k in ('earth_radius', 'semi_major_axis', 'semi_minor_axis', 'inverse_flattening')}
+    if 'earth_radius' not in ellipsoid_attrs and ellipsoid_attrs.get('inverse_flattening', 1.0) == 0.0:
+      ellipsoid_attrs['earth_radius'] = ellipsoid_attrs['semi_major_axis']   # pyproj writes a sphere as a = b
+    if 'earth_radius' in ellipsoid_attrs:
+      ellipsoid_attrs = {'earth_radius': ellipsoid_attrs['earth_radius']}
+
     data_attrs = {
       'grid_mapping': 'crs',
       'coordinates': 'lat lon'
@@ -1334,6 +1387,15 @@ class FE_GISPrep:
       
       'lat': (['y', 'x'], self.lats, {'standard_name': 'latitude', 'units': 'degrees_north'}),
       'lon': (['y', 'x'], self.lons, {'standard_name': 'longitude', 'units': 'degrees_east'}),
+
+      'mapfac_x': (['y', 'x'], self.mapfac_x, dict(data_attrs, units='1',
+                    long_name='map scale factor in x, (grid distance)/(Earth distance)')),
+      'mapfac_y': (['y', 'x'], self.mapfac_y, dict(data_attrs, units='1',
+                    long_name='map scale factor in y, (grid distance)/(Earth distance)')),
+      'sinalpha': (['y', 'x'], self.sinalpha, dict(data_attrs, units='1',
+                    long_name='sine of the grid rotation angle, u_earth = u*cosalpha - v*sinalpha')),
+      'cosalpha': (['y', 'x'], self.cosalpha, dict(data_attrs, units='1',
+                    long_name='cosine of the grid rotation angle, v_earth = v*cosalpha + u*sinalpha')),
       
       'elevation': (['y', 'x'], elev, data_attrs),
       'LandCover': (['y', 'x'], nlcd, dict(data_attrs, long_name='land-cover class code',
@@ -1347,7 +1409,8 @@ class FE_GISPrep:
         'false_easting': 0.0,
         'false_northing': 0.0,
         'crs_wkt': wkt_str,      
-        'spatial_ref': wkt_str   
+        'spatial_ref': wkt_str,
+        **ellipsoid_attrs
       })
     }
 
@@ -1502,4 +1565,5 @@ if __name__ == '__main__':
     FGP.processBuildings()
 
   FGP.genCoords()
+  FGP.genMapFactors()
   FGP.gisNetCDF()

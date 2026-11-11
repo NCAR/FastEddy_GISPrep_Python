@@ -33,6 +33,13 @@ python -m FE_GISPrep_Python {/path/to/parameter/file}
 ## Output
 The output GIS NetCDF file matches the specifications required by FastEddy GeoSpec.py.
 
+### Coordinates, map scale factors and grid rotation
+- `x`, `y`, `lat` and `lon` are at the cell centres of the output rasters (the FastEddy mass points). Files made before this change hold the cell corners, half a cell (`cell_size/2` along each projection axis) to the south-west.
+- `mapfac_x`, `mapfac_y` (y, x): map scale factors, (grid distance)/(Earth distance), along the projection x and y axes. They are computed separately, so non-conformal projections are handled; for the Lambert Conformal projection they are equal.
+- `sinalpha`, `cosalpha` (y, x): grid rotation, with alpha counter-clockwise from true north to the grid +y axis, `u_earth = u*cosalpha - v*sinalpha` and `v_earth = v*cosalpha + u*sinalpha` (the same convention as WRF `SINALPHA`/`COSALPHA`).
+- These fields use the numerics of the FastEddy analytic map mode (centered differences of half-width 1 m along the projection axes, geodesic distances on the projection's ellipsoid). FastEddy reads them with `mapScaleSelector = 1` via GeoSpec and SimGrid.
+- The `crs` variable carries the Earth shape: `earth_radius` for a sphere (e.g. `proj_R = 6370000` to match WRF), otherwise `semi_major_axis`, `semi_minor_axis` and `inverse_flattening` (WGS84 for the default projection).
+
 ## Optional soil data (POLARIS)
 For the FastEddy land-surface model, setting `polaris_url` (for example `http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0`)
 adds POLARIS soil properties (Chaney et al. 2019, Water Resources Research 55:2916; 30 m, CONUS only). The 1 x 1 degree
