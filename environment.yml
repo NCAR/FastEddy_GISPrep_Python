@@ -12,5 +12,6 @@ dependencies:
   - pyproj=3.7.*
   - rasterio=1.4.*
   - requests=2.32.*
+  - scipy=1.*
   - shapely=2.0.*
   - xarray=2025.1.*

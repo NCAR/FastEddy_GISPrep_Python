@@ -1,0 +1,16 @@
+{
+  "domain_name": "murcia_20km",
+  "lon_0": -1.1304,
+  "lat_0": 37.9922,
+  "domain_height": 20000,
+  "domain_width": 20000,
+  "cell_size": 10,
+  "lod": 0,
+  "height_filters": "strict",
+  "base_path": "/path/to/output/directory",
+  "elev_source": "copernicus",
+  "landcover_source": "worldcover",
+  "soil_source": "soilgrids",
+  "buildings_fp_url": "s3://overturemaps-us-west-2/release",
+  "lidar_url": ""
+}
